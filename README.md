@@ -106,7 +106,7 @@ docker compose up --build
 ```bash
 python3 -m pip install -r requirements.txt
 SENSOR_DB_PATH=./sensors.db uvicorn app.main:app --reload --port 8000
-pytest -q        # 运行 413 个端到端行为测试（需 pytest、httpx）
+pytest -q        # 运行 415 个端到端行为测试（需 pytest、httpx）
 ```
 
 ## 时间线语义
@@ -774,6 +774,10 @@ curl -s -X POST localhost:8000/sessions/lab-1/quarantine-audit \
 **区间语义**：相邻对在**落在闭区间内的读数之间**形成——一个缺口若有一端在 `from`/`to`
 之外（跨越边界）则不报告，两端都在区间内才报告；`from`/`to` 含等号。
 
+**阈值精度**：阈值按请求中的秒数原值与存储的整数微秒时间线精确比较（不足 1 微秒的
+零头只向下取、绝不四舍五入），例如阈值 `0.0000015` 秒时，2 微秒的间隔仍严格大于阈值、
+会被报告，而恰好 2 微秒宽的阈值 `0.000002` 则排除同样的间隔。
+
 **排序与分页**：所有来源的缺口按其起始读数的键
 `(start.observed_at, source_id, start.seq)` 全局升序排列（同一来源用 `seq` 破并，
 跨来源用 `source_id` 破并）。keyset 游标分页保证过滤与分页跨页仍保持这一确定顺序，
@@ -966,7 +970,9 @@ UTC 形式（如 `...T12:00:00+02:00` 回显为 `...T10:00:00Z`，不带时区�
 
 **邻居与判定**：对每条有效读数，其邻居是**区间内**事件时间距离
 `|observed_at_i − observed_at_j| <= window_seconds`（窗口边界**含等号**）的**其他**
-有效读数（不含自身）。
+有效读数（不含自身）。窗口按请求中的秒数原值与存储的整数微秒时间线精确比较
+（不足 1 微秒的零头只向下取、绝不四舍五入），例如窗口 `0.0000015` 秒够不到
+2 微秒外的读数，而窗口 `0.000002` 恰好含等号覆盖 2 微秒处。
 
 - 邻居**少于 3 条** → 不判定，计入 `insufficient_neighbors_count`；
 - 否则计算邻居取值的中位数 `local_median`，以及邻居对该中位数绝对偏差的中位数
@@ -1128,10 +1134,10 @@ curl -s 'localhost:8000/sessions/lab-1/local-spikes?source_id=thermometer-a&from
 │   ├── test_retention.py    # 检查点安全清理：dry_run/保护边界/跨轮清理偏移倒挂/原子删除/幂等/不改变既有语义测试（31 个）
 │   ├── test_retention_retry.py # 清理后重试判重：墓碑判重/异值 409/整批回滚/封存关闭后重试/不推进水位线告警/检查点不变/迁移测试（17 个）
 │   ├── test_quarantine_audit.py # 隔离影响预演：插入位置/邻居时间差/检查点影响/跨轮清理/过滤/400/只读测试（45 个）
-│   └── test_source_gaps.py # 来源缺口扫描：相邻配对/严格阈值/微秒精度/闭区间/游标分页/400/只读测试（29 个）
+│   └── test_source_gaps.py # 来源缺口扫描：相邻配对/严格阈值/微秒精度/闭区间/游标分页/400/只读测试（30 个）
 │   └── test_arrival_latency.py # 到达延迟剖析：逐来源统计/负延迟/微秒精度/闭区间/空来源/400/只读/单快照测试（19 个）
 │   └── test_exposure.py   # 阈值暴露时长：持有语义/起点继承/同刻 seq/未知区间/value_key/只看已发布/400/只读/单快照测试（47 个）
-│   └── test_local_spikes.py # 局部尖峰：中位数/MAD/严格判定/MAD 为零/邻居窗口与下限/闭区间/value_key/200 上限/400/只读/单快照测试（52 个）
+│   └── test_local_spikes.py # 局部尖峰：中位数/MAD/严格判定/MAD 为零/邻居窗口与下限/闭区间/value_key/200 上限/400/只读/单快照测试（53 个）
 ├── Dockerfile
 ├── docker-compose.yml
 └── requirements.txt

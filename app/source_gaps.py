@@ -4,9 +4,12 @@
 *published* reading of the session -- per source, in deterministic event
 order ``(observed_at, seq)`` -- and reports each pair of *adjacent*
 readings whose event-time distance is **strictly greater** than
-``max_gap_seconds``.  Buffered and quarantined readings never participate
-(quarantined readings are not part of the published timeline; buffered
-readings have not been published yet).
+``max_gap_seconds``.  The threshold is compared at its exact requested
+value against the integer-microsecond stored timeline, so a fractional
+microsecond is never rounded away (a 2-microsecond gap exceeds a
+0.0000015-second threshold).  Buffered and quarantined readings never
+participate (quarantined readings are not part of the published timeline;
+buffered readings have not been published yet).
 
 Filtering and ordering
 
@@ -38,7 +41,12 @@ from .cursor import decode_cursor, encode_cursor
 from .database import read_transaction
 from .errors import BadRequestError
 from .service import _load_session
-from .time_utils import format_event_time, parse_event_time, store_event_time
+from .time_utils import (
+    floor_seconds_to_micros,
+    format_event_time,
+    parse_event_time,
+    store_event_time,
+)
 
 __all__ = ["list_source_gaps", "DEFAULT_LIMIT", "MAX_LIMIT"]
 
@@ -72,12 +80,14 @@ def _optional_time(value: Any, field: str) -> Optional[str]:
     return store_event_time(parse_event_time(value))
 
 
-def _validate_max_gap(value: Any) -> float:
+def _validate_max_gap(value: Any) -> tuple[float, int]:
     """Parse the required ``max_gap_seconds`` query parameter (400 on error).
 
     Query parameters arrive as strings; anything that is not a finite,
     non-negative number -- missing value, junk, NaN, Infinity, negative --
-    is a bad request rather than a Pydantic 422.
+    is a bad request rather than a Pydantic 422.  Returns the seconds float
+    (echoed in the response) together with the exact whole-microsecond
+    floor of the requested threshold, clamped to SQLite's maximum integer.
     """
     if value is None:
         raise BadRequestError("max_gap_seconds is required")
@@ -95,7 +105,7 @@ def _validate_max_gap(value: Any) -> float:
         raise BadRequestError(
             f"max_gap_seconds must be >= 0, got {seconds}"
         )
-    return seconds
+    return seconds, _threshold_micros(value)
 
 
 def _validate_limit(value: Any) -> int:
@@ -113,20 +123,20 @@ def _validate_limit(value: Any) -> int:
     return limit_value
 
 
-def _threshold_micros(seconds: float) -> int:
-    """Convert the threshold to integer storage microseconds.
+def _threshold_micros(seconds_text: str) -> int:
+    """Convert the validated threshold text to integer storage microseconds.
 
     Stored timestamps have microsecond resolution, so the strict comparison
-    ``gap_micros > threshold_micros`` is exactly "adjacent event times more
-    than ``max_gap_seconds`` apart" at that resolution.  Enormous (but
-    finite) inputs clamp to SQLite's maximum integer: such a threshold can
-    never be exceeded by any stored gap, so the scan simply finds nothing.
+    ``gap_micros > floor(seconds)`` is exactly "adjacent event times more
+    than ``max_gap_seconds`` apart": the requested seconds are floored to
+    whole microseconds at their exact decimal value, never rounded (a
+    threshold of ``0.0000015`` floors to 1 microsecond, so a 2-microsecond
+    gap still exceeds it).  Enormous (but finite) inputs clamp to SQLite's
+    maximum integer: such a threshold can never be exceeded by any stored
+    gap, so the scan simply finds nothing instead of overflowing the
+    parameter binding.
     """
-    scaled = seconds * 1_000_000
-    if not math.isfinite(scaled):
-        return _MAX_THRESHOLD_MICROS
-    micros = int(round(scaled))
-    return min(micros, _MAX_THRESHOLD_MICROS)
+    return min(floor_seconds_to_micros(seconds_text), _MAX_THRESHOLD_MICROS)
 
 
 # ---------------------------------------------------------------------------
@@ -195,7 +205,7 @@ def list_source_gaps(
     :class:`~app.errors.BadRequestError` / :class:`TimestampError` (400);
     an unknown session raises 404; an undeclared ``source_id`` raises 400.
     """
-    max_gap = _validate_max_gap(max_gap_seconds)
+    max_gap, threshold_micros = _validate_max_gap(max_gap_seconds)
 
     if source_id is not None and (
         not isinstance(source_id, str) or not source_id.strip()
@@ -211,7 +221,6 @@ def list_source_gaps(
         )
 
     limit_value = _validate_limit(limit)
-    threshold_micros = _threshold_micros(max_gap)
 
     cursor_keyset: Optional[tuple] = None
     if cursor is not None:

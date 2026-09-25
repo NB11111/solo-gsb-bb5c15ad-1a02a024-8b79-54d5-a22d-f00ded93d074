@@ -12,7 +12,10 @@ skipped (they are neither candidates nor neighbours).
 
 For every valid reading the neighbours are the **other** valid readings whose
 event-time distance is at most ``window_seconds`` (the boundary is inclusive);
-readings outside ``[from, to]`` never participate.  With fewer than three
+readings outside ``[from, to]`` never participate.  The window is compared at
+its exact requested value against the integer-microsecond stored timeline, so
+a fractional microsecond is never rounded up (a 0.0000015-second window does
+not reach a reading 2 microseconds away).  With fewer than three
 neighbours the reading is left undecided.  Otherwise its local median (the
 median of the neighbour values) and MAD (the median of the neighbours'
 absolute deviations from that median) are computed, and the reading is a spike
@@ -43,7 +46,12 @@ from .alerts import extract_numeric
 from .database import read_transaction
 from .errors import BadRequestError
 from .service import _load_session
-from .time_utils import format_event_time, parse_event_time, store_event_time
+from .time_utils import (
+    floor_seconds_to_micros,
+    format_event_time,
+    parse_event_time,
+    store_event_time,
+)
 
 __all__ = ["local_spikes", "MAX_READINGS"]
 
@@ -141,8 +149,13 @@ def local_spikes(
     from_dt = parse_event_time(from_store)
     to_dt = parse_event_time(to_store)
     # Stored timestamps have microsecond resolution; the inclusive distance
-    # test ``abs(dt_i - dt_j) <= window`` is evaluated in exact microseconds.
-    window_micros = int(round(window * 1_000_000))
+    # test ``abs(dt_i - dt_j) <= window`` is evaluated against the exact
+    # whole-microsecond floor of the requested window, so a sub-microsecond
+    # fraction is never rounded up (a 0.0000015-second window reaches 1
+    # microsecond, not 2).  ``window_seconds`` is a validated finite string
+    # here, and an enormous window floors to an enormous int -- the pure
+    # Python comparison below cannot overflow.
+    window_micros = floor_seconds_to_micros(window_seconds)
 
     filter_sql = (
         "session_id = ? AND source_id = ? AND status = 'published'"

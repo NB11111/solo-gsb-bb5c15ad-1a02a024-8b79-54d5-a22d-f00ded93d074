@@ -264,6 +264,34 @@ class TestNeighbourWindow:
         assert cand["mad"] == 0
         assert cand["deviation"] == 40
 
+    def test_sub_microsecond_window_is_not_rounded_up(self, client):
+        c, db_path = client
+        sid = create_session(c, sources=("a",))
+        # One microsecond between adjacent readings; the outlier seq 3 sits
+        # 2us away from seqs 1 and 5 and 1us away from seqs 2 and 4.
+        layout = [
+            (1, "2026-01-01T10:00:00.000000Z", 10),
+            (2, "2026-01-01T10:00:00.000001Z", 10),
+            (3, "2026-01-01T10:00:00.000002Z", 50),
+            (4, "2026-01-01T10:00:00.000003Z", 10),
+            (5, "2026-01-01T10:00:00.000004Z", 10),
+        ]
+        for seq, ts, value in layout:
+            insert_row(db_path, sid, "a", seq, ts, value)
+        # Window 1.5us reaches only the 1us-distant pair (2 neighbours), so
+        # seq 3 stays undecided; rounding the window up to 2us would wrongly
+        # pull in seqs 1 and 5 and flag a spike.
+        body = call(c, sid, window="0.0000015", sensitivity="3").json()
+        assert body["spikes"] == []
+        assert body["insufficient_neighbors_count"] == 5
+        # At exactly 2us the boundary is inclusive: seq 3 gains four
+        # identical neighbours (MAD 0) and is flagged.
+        body = call(c, sid, window="0.000002", sensitivity="3").json()
+        assert spike_keys(body) == [("2026-01-01T10:00:00.000002Z", 3)]
+        assert body["spikes"][0]["local_median"] == 10
+        assert body["spikes"][0]["mad"] == 0
+        assert body["spikes"][0]["deviation"] == 40
+
     def test_neighbours_are_other_valid_readings_only(self, client):
         # The reading itself is never its own neighbour; readings outside the
         # window are ignored even if they would change the median.

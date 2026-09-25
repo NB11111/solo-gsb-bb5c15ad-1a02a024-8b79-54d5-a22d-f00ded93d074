@@ -7,7 +7,9 @@ suffix.
 """
 from __future__ import annotations
 
+import math
 from datetime import datetime, timezone
+from fractions import Fraction
 
 
 class TimestampError(ValueError):
@@ -45,6 +47,23 @@ def _utc_iso(dt: datetime, *, timespec: str) -> str:
 def store_event_time(dt: datetime) -> str:
     """Fixed-width, sortable UTC form used for all stored/compared times."""
     return _utc_iso(dt, timespec="microseconds")
+
+
+def floor_seconds_to_micros(seconds: str) -> int:
+    """Greatest whole-microsecond count not exceeding ``seconds`` exactly.
+
+    ``seconds`` is the request's seconds value as text (already validated as
+    a finite number); its exact decimal value -- not the rounded binary
+    float -- is scaled to microseconds and floored, so ``"0.0000015"``
+    yields 1: a sub-microsecond fraction is never rounded up to a whole
+    microsecond.  Stored event times have microsecond resolution, so for an
+    integer microsecond distance ``m`` this floor reproduces the exact
+    comparison against the requested seconds: ``m > floor`` iff ``m``
+    micros is strictly more than ``seconds``, and ``m <= floor`` iff it is
+    at most ``seconds``.  Arbitrarily large finite inputs floor to
+    arbitrarily large ints without overflow.
+    """
+    return math.floor(Fraction(seconds.strip()) * 1_000_000)
 
 
 def format_event_time(dt: datetime) -> str:

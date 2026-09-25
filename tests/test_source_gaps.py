@@ -164,6 +164,37 @@ class TestSourceGapDetection:
         body = gaps(c, sid, max_gap_seconds=0.000001).json()
         assert body["gaps"] == []
 
+    def test_sub_microsecond_threshold_is_not_rounded_up(self, client):
+        c, _ = client
+        sid = create_session(c)
+        report(c, sid, [
+            {"source_id": "a", "seq": 1,
+             "observed_at": "2026-01-01T10:00:00.000000Z", "value": 1},
+            {"source_id": "a", "seq": 2,
+             "observed_at": "2026-01-01T10:00:00.000001Z", "value": 1},
+            {"source_id": "a", "seq": 3,
+             "observed_at": "2026-01-01T10:00:00.000003Z", "value": 1},
+            {"source_id": "b", "seq": 1,
+             "observed_at": "2026-01-01T10:00:00.000000Z", "value": 1},
+            {"source_id": "a", "seq": 99,
+             "observed_at": "2026-01-01T10:01:00Z", "value": 1},
+            {"source_id": "b", "seq": 99,
+             "observed_at": "2026-01-01T10:01:00Z", "value": 1},
+        ])
+        # Threshold 1.5us: the 2us gap (:01 -> :03) strictly exceeds it and
+        # must be reported; the 1us gap (:00 -> :01) does not.  Rounding the
+        # threshold to 2us would wrongly miss the 2us gap.
+        body = gaps(c, sid, max_gap_seconds="0.0000015").json()
+        assert body["matched"] == 1
+        assert gap_keys(body) == [
+            ("a", ("2026-01-01T10:00:00.000001Z", 2),
+             ("2026-01-01T10:00:00.000003Z", 3), 0.000002),
+        ]
+        # Exactly at the 2us width the gap is excluded (strictly greater).
+        body = gaps(c, sid, max_gap_seconds="0.000002").json()
+        assert body["gaps"] == []
+        assert body["matched"] == 0
+
     def test_source_filter(self, client):
         c, _ = client
         sid = setup_timeline(c)

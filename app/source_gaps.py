@@ -8,6 +8,13 @@ readings whose event-time distance is **strictly greater** than
 (quarantined readings are not part of the published timeline; buffered
 readings have not been published yet).
 
+The threshold is judged by its *original* finite non-negative seconds
+value, never by a rounded microsecond count: stored timestamps have
+microsecond resolution, so the strict test is evaluated exactly as
+``gap_micros > floor(max_gap_seconds * 1_000_000)`` (a fractional
+threshold such as 0.0000015 s keeps floor 1 microsecond, and a
+2-microsecond gap is still reported).
+
 Filtering and ordering
 
 * ``source_id`` restricts the scan to one declared source; an unknown
@@ -38,7 +45,12 @@ from .cursor import decode_cursor, encode_cursor
 from .database import read_transaction
 from .errors import BadRequestError
 from .service import _load_session
-from .time_utils import format_event_time, parse_event_time, store_event_time
+from .time_utils import (
+    format_event_time,
+    parse_event_time,
+    seconds_floor_micros,
+    store_event_time,
+)
 
 __all__ = ["list_source_gaps", "DEFAULT_LIMIT", "MAX_LIMIT"]
 
@@ -113,20 +125,24 @@ def _validate_limit(value: Any) -> int:
     return limit_value
 
 
-def _threshold_micros(seconds: float) -> int:
-    """Convert the threshold to integer storage microseconds.
+def _threshold_micros(value: Any) -> int:
+    """Exact integer-microsecond floor of the seconds threshold.
 
     Stored timestamps have microsecond resolution, so the strict comparison
-    ``gap_micros > threshold_micros`` is exactly "adjacent event times more
-    than ``max_gap_seconds`` apart" at that resolution.  Enormous (but
-    finite) inputs clamp to SQLite's maximum integer: such a threshold can
-    never be exceeded by any stored gap, so the scan simply finds nothing.
+    ``gap_micros > max_gap_seconds`` is evaluated exactly as
+    ``gap_micros > floor(max_gap_seconds * 1_000_000)`` -- a fractional
+    threshold such as 0.0000015 s (1.5 microseconds) keeps floor 1, so a
+    2-microsecond gap is still reported rather than rounded out of range.
+    Enormous (but finite) inputs clamp to SQLite's maximum integer: such a
+    threshold can never be exceeded by any stored gap, so the scan simply
+    finds nothing and the parameter binding never overflows.
     """
-    scaled = seconds * 1_000_000
-    if not math.isfinite(scaled):
+    micros = seconds_floor_micros(value)
+    if micros > _MAX_THRESHOLD_MICROS:
         return _MAX_THRESHOLD_MICROS
-    micros = int(round(scaled))
-    return min(micros, _MAX_THRESHOLD_MICROS)
+    if micros < 0:
+        return 0
+    return micros
 
 
 # ---------------------------------------------------------------------------
@@ -211,7 +227,7 @@ def list_source_gaps(
         )
 
     limit_value = _validate_limit(limit)
-    threshold_micros = _threshold_micros(max_gap)
+    threshold_micros = _threshold_micros(max_gap_seconds)
 
     cursor_keyset: Optional[tuple] = None
     if cursor is not None:

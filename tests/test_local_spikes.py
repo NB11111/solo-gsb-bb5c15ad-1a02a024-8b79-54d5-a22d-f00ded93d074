@@ -264,6 +264,67 @@ class TestNeighbourWindow:
         assert cand["mad"] == 0
         assert cand["deviation"] == 40
 
+    def test_fractional_microsecond_window_is_not_rounded(self, client):
+        # An outlier at t with calm readings at t-2us, t-1us, t, t+1us,
+        # t+2us.  Only the same-time readings are within a 1.5us window
+        # (distance in whole microseconds); a 2us distance lies outside it.
+        # Round-half-to-even used to widen the window to 2us and make the
+        # +/-2us readings neighbours.
+        c, db_path = client
+        sid = create_session(c, sources=("a",))
+        layout = [
+            (1, "2026-01-01T10:00:00.000000Z", 10),   # -2us
+            (2, "2026-01-01T10:00:00.000001Z", 10),   # -1us
+            (3, "2026-01-01T10:00:00.000002Z", 50),   # candidate
+            (4, "2026-01-01T10:00:00.000003Z", 10),   # +1us
+            (5, "2026-01-01T10:00:00.000004Z", 10),   # +2us
+        ]
+        for seq, ts, value in layout:
+            insert_row(db_path, sid, "a", seq, ts, value)
+
+        # 1.5 microseconds: every reading has only the same-timestamp readings
+        # in range -- zero or one neighbours -- so nothing is judged, and the
+        # +/-2us readings must not be listed as neighbours (no 50 spike).
+        body = call(
+            c, sid,
+            lo="2026-01-01T10:00:00Z",
+            hi="2026-01-01T10:00:00.000004Z",
+            window="0.0000015", sensitivity="3",
+        ).json()
+        assert body["readings_count"] == 5
+        assert body["insufficient_neighbors_count"] == 5
+        assert body["spikes"] == []
+        # Exactly 2 microseconds is on the inclusive boundary: all four calm
+        # readings are now neighbours of the 50 candidate -> MAD 0 -> spike.
+        body = call(
+            c, sid,
+            lo="2026-01-01T10:00:00Z",
+            hi="2026-01-01T10:00:00.000004Z",
+            window="0.000002", sensitivity="3",
+        ).json()
+        cand = next(s for s in body["spikes"] if s["key"]["seq"] == 3)
+        assert cand["mad"] == 0
+        assert cand["deviation"] == 40
+        # 2.5 microseconds is wider than 2 but not enough for any new whole
+        # microsecond distance; the boundary stays at 2 microseconds.
+        body = call(
+            c, sid,
+            lo="2026-01-01T10:00:00Z",
+            hi="2026-01-01T10:00:00.000004Z",
+            window="0.0000025", sensitivity="3",
+        ).json()
+        assert [s["key"]["seq"] for s in body["spikes"]] == [3]
+        # 1 microsecond: the +/-2us readings are out, the candidate has only
+        # the two +/-1us neighbours (< 3) and must not be judged.
+        body = call(
+            c, sid,
+            lo="2026-01-01T10:00:00Z",
+            hi="2026-01-01T10:00:00.000004Z",
+            window="0.000001", sensitivity="3",
+        ).json()
+        assert body["insufficient_neighbors_count"] == 5
+        assert body["spikes"] == []
+
     def test_neighbours_are_other_valid_readings_only(self, client):
         # The reading itself is never its own neighbour; readings outside the
         # window are ignored even if they would change the median.
@@ -532,6 +593,27 @@ class TestErrors:
         sid = create_session(c)
         assert call(c, sid, source="  ").status_code == 400
         assert call(c, sid, **{"value_key": "  "}).status_code == 400
+
+    def test_enormous_window_does_not_overflow(self, client):
+        # A finite window that overflows integers (and float after scaling)
+        # simply makes every distance in-range: no crash, no false exclusion.
+        c, db_path = client
+        sid = create_session(c, sources=("a",))
+        for seq, (ts, value) in enumerate(
+            [
+                ("2026-01-01T10:00:00Z", 10),
+                ("2026-01-01T10:00:30Z", 10),
+                ("2026-01-01T10:01:00Z", 1000),
+                ("2026-01-01T10:01:30Z", 10),
+            ],
+            start=1,
+        ):
+            insert_row(db_path, sid, "a", seq, ts, value)
+        r = call(c, sid, window="1e308")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["insufficient_neighbors_count"] == 0
+        assert [s["key"]["seq"] for s in body["spikes"]] == [3]
 
 
 class TestNormalisationAndEcho:

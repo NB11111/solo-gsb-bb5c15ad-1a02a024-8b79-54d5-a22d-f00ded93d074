@@ -12,11 +12,16 @@ skipped (they are neither candidates nor neighbours).
 
 For every valid reading the neighbours are the **other** valid readings whose
 event-time distance is at most ``window_seconds`` (the boundary is inclusive);
-readings outside ``[from, to]`` never participate.  With fewer than three
-neighbours the reading is left undecided.  Otherwise its local median (the
-median of the neighbour values) and MAD (the median of the neighbours'
-absolute deviations from that median) are computed, and the reading is a spike
-exactly when::
+readings outside ``[from, to]`` never participate.  The window is judged by
+its *original* positive finite seconds value, never by a rounded microsecond
+count: stored timestamps have microsecond resolution, so the inclusive test
+is evaluated exactly as ``distance_micros <= floor(window_seconds *
+1_000_000)`` (a fractional window such as 0.0000015 s keeps floor 1
+microsecond, and a reading 2 microseconds away is not a neighbour).  With
+fewer than three neighbours the reading is left undecided.  Otherwise its
+local median (the median of the neighbour values) and MAD (the median of the
+neighbours' absolute deviations from that median) are computed, and the
+reading is a spike exactly when::
 
     |value - local_median| > sensitivity * MAD
 
@@ -43,7 +48,12 @@ from .alerts import extract_numeric
 from .database import read_transaction
 from .errors import BadRequestError
 from .service import _load_session
-from .time_utils import format_event_time, parse_event_time, store_event_time
+from .time_utils import (
+    format_event_time,
+    parse_event_time,
+    seconds_floor_micros,
+    store_event_time,
+)
 
 __all__ = ["local_spikes", "MAX_READINGS"]
 
@@ -141,8 +151,11 @@ def local_spikes(
     from_dt = parse_event_time(from_store)
     to_dt = parse_event_time(to_store)
     # Stored timestamps have microsecond resolution; the inclusive distance
-    # test ``abs(dt_i - dt_j) <= window`` is evaluated in exact microseconds.
-    window_micros = int(round(window * 1_000_000))
+    # test ``abs(dt_i - dt_j) <= window_seconds`` is evaluated exactly as
+    # ``distance_micros <= floor(window_seconds * 1_000_000)`` -- a
+    # fractional window such as 0.0000015 s (1.5 microseconds) keeps floor 1,
+    # so a reading 2 microseconds away is not rounded into the neighbourhood.
+    window_micros = seconds_floor_micros(window_seconds)
 
     filter_sql = (
         "session_id = ? AND source_id = ? AND status = 'published'"

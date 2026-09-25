@@ -7,11 +7,44 @@ suffix.
 """
 from __future__ import annotations
 
+from decimal import Decimal, ROUND_FLOOR
 from datetime import datetime, timezone
+from fractions import Fraction
+from typing import Any
 
 
 class TimestampError(ValueError):
     """Raised when an observed_at value cannot be parsed."""
+
+
+def seconds_floor_micros(seconds: Any) -> int:
+    """Exact floor of a seconds threshold converted to integer microseconds.
+
+    Stored timestamps have microsecond resolution, so every event-time
+    distance is an integer number of microseconds ``d``.  Comparing such a
+    distance against a seconds threshold ``t`` exactly reduces to an integer
+    comparison against ``floor(t * 1_000_000)``:
+
+    * inclusive  ``d <= t``  <=>  ``d <= floor_micros``
+    * strict     ``d >  t``  <=>  ``d >  floor_micros``
+
+    The threshold must be judged by the *original* value the request sent,
+    not by a rounded microsecond count: ``0.0000015`` seconds (1.5
+    microseconds) has floor 1, never the round-half-to-even result 2.
+    Query parameters arrive as strings, so strings are parsed as exact
+    decimals (``Decimal("0.0000015")`` is exactly 1.5 microseconds); an
+    already-parsed ``float`` uses its exact binary value instead.  The caller
+    is responsible for having validated that the value is finite.
+    """
+    if isinstance(seconds, str):
+        scaled = Decimal(seconds.strip()) * 1_000_000
+        # ROUND_FLOOR (not int(), which rounds toward zero) so the rule also
+        # stays exact for any non-negative decimal the callers allow.
+        return int(scaled.to_integral_value(rounding=ROUND_FLOOR))
+    # Fraction(float) is the float's exact rational value -- no intermediate
+    # rounded float multiplication -- and integer division floors.
+    scaled = Fraction(float(seconds)) * 1_000_000
+    return scaled.numerator // scaled.denominator
 
 
 def parse_event_time(value: str) -> datetime:

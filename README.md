@@ -106,7 +106,7 @@ docker compose up --build
 ```bash
 python3 -m pip install -r requirements.txt
 SENSOR_DB_PATH=./sensors.db uvicorn app.main:app --reload --port 8000
-pytest -q        # 运行 413 个端到端行为测试（需 pytest、httpx）
+pytest -q        # 运行 416 个端到端行为测试（需 pytest、httpx）
 ```
 
 ## 时间线语义
@@ -760,6 +760,12 @@ curl -s -X POST localhost:8000/sessions/lab-1/quarantine-audit \
 `max_gap_seconds` 的缺口。`buffered` 与 `quarantined` 读数永不参与（隔离读数不属于已发布
 时间线；缓冲读数尚未发布），因此迟到读数不会把一个缺口“劈开”。
 
+阈值按请求中的**原值**精确判断，绝不四舍五入成整数微秒：存储时间戳为微秒精度，
+严格比较精确等价于 `间隔微秒数 > floor(max_gap_seconds × 1_000_000)`。例如阈值
+`0.0000015` 秒（1.5 微秒）的 floor 为 1 微秒，因此 **2 微秒的间隔仍被报告**；
+恰好等于阈值的间隔不算。极大但有限的阈值（如 `1e308`）只会得到空结果，
+不会因整数溢出报错或漏报。
+
 查询参数（全部通过 query string 传递）：
 
 | 参数 | 必填 | 说明 |
@@ -966,7 +972,11 @@ UTC 形式（如 `...T12:00:00+02:00` 回显为 `...T10:00:00Z`，不带时区�
 
 **邻居与判定**：对每条有效读数，其邻居是**区间内**事件时间距离
 `|observed_at_i − observed_at_j| <= window_seconds`（窗口边界**含等号**）的**其他**
-有效读数（不含自身）。
+有效读数（不含自身）。窗口同样按请求中的**原值**精确判断，绝不四舍五入成整数微秒，
+精确等价于 `距离微秒数 <= floor(window_seconds × 1_000_000)`：例如窗口 `0.0000015`
+秒（1.5 微秒）的 floor 为 1 微秒，相距 **2 微秒的读数不是邻居**；恰好 2 微秒的窗口
+则把相距 2 微秒的读数纳入邻域（边界含等号）。极大但有限的窗口（如 `1e308`）等价于
+容纳全部读数，不会因整数溢出报错或误判。
 
 - 邻居**少于 3 条** → 不判定，计入 `insufficient_neighbors_count`；
 - 否则计算邻居取值的中位数 `local_median`，以及邻居对该中位数绝对偏差的中位数
@@ -1128,10 +1138,10 @@ curl -s 'localhost:8000/sessions/lab-1/local-spikes?source_id=thermometer-a&from
 │   ├── test_retention.py    # 检查点安全清理：dry_run/保护边界/跨轮清理偏移倒挂/原子删除/幂等/不改变既有语义测试（31 个）
 │   ├── test_retention_retry.py # 清理后重试判重：墓碑判重/异值 409/整批回滚/封存关闭后重试/不推进水位线告警/检查点不变/迁移测试（17 个）
 │   ├── test_quarantine_audit.py # 隔离影响预演：插入位置/邻居时间差/检查点影响/跨轮清理/过滤/400/只读测试（45 个）
-│   └── test_source_gaps.py # 来源缺口扫描：相邻配对/严格阈值/微秒精度/闭区间/游标分页/400/只读测试（29 个）
+│   └── test_source_gaps.py # 来源缺口扫描：相邻配对/严格阈值/微秒精度/半微秒阈值不四舍五入/闭区间/游标分页/400/只读测试（30 个）
 │   └── test_arrival_latency.py # 到达延迟剖析：逐来源统计/负延迟/微秒精度/闭区间/空来源/400/只读/单快照测试（19 个）
 │   └── test_exposure.py   # 阈值暴露时长：持有语义/起点继承/同刻 seq/未知区间/value_key/只看已发布/400/只读/单快照测试（47 个）
-│   └── test_local_spikes.py # 局部尖峰：中位数/MAD/严格判定/MAD 为零/邻居窗口与下限/闭区间/value_key/200 上限/400/只读/单快照测试（52 个）
+│   └── test_local_spikes.py # 局部尖峰：中位数/MAD/严格判定/MAD 为零/邻居窗口与下限/半微秒窗口不四舍五入/闭区间/value_key/200 上限/400/只读/单快照测试（54 个）
 ├── Dockerfile
 ├── docker-compose.yml
 └── requirements.txt

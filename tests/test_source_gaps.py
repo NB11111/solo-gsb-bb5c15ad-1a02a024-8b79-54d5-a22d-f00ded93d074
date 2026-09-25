@@ -164,6 +164,35 @@ class TestSourceGapDetection:
         body = gaps(c, sid, max_gap_seconds=0.000001).json()
         assert body["gaps"] == []
 
+    def test_fractional_microsecond_threshold_is_not_rounded(self, client):
+        c, _ = client
+        sid = create_session(c)
+        report(c, sid, [
+            {"source_id": "a", "seq": 1,
+             "observed_at": "2026-01-01T10:00:00.000000Z", "value": 1},
+            {"source_id": "a", "seq": 2,
+             "observed_at": "2026-01-01T10:00:00.000002Z", "value": 1},
+            {"source_id": "b", "seq": 1,
+             "observed_at": "2026-01-01T10:00:00.000000Z", "value": 1},
+            {"source_id": "a", "seq": 99,
+             "observed_at": "2026-01-01T10:01:00Z", "value": 1},
+            {"source_id": "b", "seq": 99,
+             "observed_at": "2026-01-01T10:01:00Z", "value": 1},
+        ])
+        # The threshold is exactly 1.5 microseconds; a 2-microsecond gap is
+        # strictly greater than it and must be reported.  Round-half-to-even
+        # used to lift the threshold to 2 microseconds and hide the gap.
+        body = gaps(c, sid, max_gap_seconds="0.0000015").json()
+        assert body["matched"] == 1
+        assert gap_keys(body) == [
+            ("a", ("2026-01-01T10:00:00Z", 1),
+             ("2026-01-01T10:00:00.000002Z", 2), 0.000002),
+        ]
+        # Strict boundary: the same gap does not exceed exactly 2
+        # microseconds, nor 2.5 microseconds.
+        assert gaps(c, sid, max_gap_seconds="0.000002").json()["gaps"] == []
+        assert gaps(c, sid, max_gap_seconds="0.0000025").json()["gaps"] == []
+
     def test_source_filter(self, client):
         c, _ = client
         sid = setup_timeline(c)
@@ -434,6 +463,12 @@ class TestSourceGapErrors:
         r = gaps(c, sid, max_gap_seconds="1e302")
         assert r.status_code == 200
         assert r.json()["gaps"] == []
+        # Near the maximum finite double (scaled by 1e6 overflows float):
+        # still a clean empty result, never an error or a false negative.
+        r = gaps(c, sid, max_gap_seconds="1e308")
+        assert r.status_code == 200
+        assert r.json()["gaps"] == []
+        assert r.json()["matched"] == 0
 
     def test_zero_threshold_allowed(self, client):
         c, _ = client
